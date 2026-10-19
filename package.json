@@ -1,0 +1,23 @@
+{
+  "name": "opencode-llm",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenAI-compatible LLM gateway adapter for OmniRoute and EC2, providing keyless access to OpenCode Zen, KiloCode, and OVHcloud free models",
+  "main": "src/server.ts",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/server.ts",
+    "dev": "node --experimental-strip-types --watch src/server.ts",
+    "health": "curl -s http://localhost:${FREEFLOW_PORT:-28280}/health | node -e \"process.stdin.resume();process.stdin.on('data',d=>{const j=JSON.parse(d);console.log(j.status==='ok'?'✓ healthy':'✗ degraded',JSON.stringify(j,null,2))})\""
+  },
+  "dependencies": {
+    "undici": "7.30.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "typescript": "^7.0.2"
+  },
+  "license": "MIT"
+}

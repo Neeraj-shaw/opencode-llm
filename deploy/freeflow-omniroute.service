@@ -1,0 +1,41 @@
+[Unit]
+Description=Freeflow OmniRoute - Free LLM API Gateway
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/freeflow-omniroute
+ExecStart=/usr/bin/node --experimental-strip-types src/server.ts
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=NODE_ENV=production
+Environment=FREEFLOW_PORT=28280
+Environment=FREEFLOW_HOST=0.0.0.0
+Environment=FREEFLOW_DATA_DIR=/opt/freeflow-omniroute/data
+# Uncomment and set for auth:
+# Environment=FREEFLOW_API_TOKEN=your-secret-token-here
+# Environment=FREEFLOW_REQUIRE_AUTH=true
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/freeflow-omniroute/data
+PrivateTmp=yes
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=freeflow-omniroute
+
+[Install]
+WantedBy=multi-user.target

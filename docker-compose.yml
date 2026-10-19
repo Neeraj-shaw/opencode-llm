@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  freeflow:
+    build: .
+    container_name: freeflow-omniroute
+    restart: unless-stopped
+    ports:
+      - "${FREEFLOW_PORT:-28280}:28280"
+    environment:
+      - FREEFLOW_PORT=28280
+      - FREEFLOW_HOST=0.0.0.0
+      - FREEFLOW_DATA_DIR=/data/freeflow-omniroute
+      - FREEFLOW_API_TOKEN=${FREEFLOW_API_TOKEN:-}
+      - FREEFLOW_REQUIRE_AUTH=${FREEFLOW_REQUIRE_AUTH:-false}
+      - FREEFLOW_DEBUG=${FREEFLOW_DEBUG:-0}
+      - FREEFLOW_RELAYS=${FREEFLOW_RELAYS:-}
+      - FREEFLOW_RELAY_MODE=${FREEFLOW_RELAY_MODE:-auto}
+    volumes:
+      - freeflow-data:/data/freeflow-omniroute
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:28280/health').then(r=>r.json()).then(j=>{if(j.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Memory limit — the proxy is lightweight (no SQLite, no Next.js)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Optional: OmniRoute alongside freeflow
+  # Uncomment to run both in the same compose stack
+  #
+  # omniroute:
+  #   image: ghcr.io/diegosouzapw/omniroute:latest
+  #   container_name: omniroute
+  #   restart: unless-stopped
+  #   ports:
+  #     - "20128:20128"  # Dashboard
+  #     - "20129:20129"  # API
+  #   environment:
+  #     - DASHBOARD_PORT=20128
+  #     - API_PORT=20129
+  #     - APP_BIND_HOST=0.0.0.0
+  #     - REQUIRE_API_KEY=true
+  #     - OMNIROUTE_MEMORY_MB=2048
+  #     # Point OmniRoute at freeflow (internal Docker network)
+  #     - |
+  #       OMNIROUTE_SELF_HOSTED_PROVIDERS=
+  #         providers:
+  #           - id: freeflow
+  #             kind: openai
+  #             baseUrl: http://freeflow:28280/v1
+  #             model: deepseek-v4.1-flash-free
+  #   depends_on:
+  #     freeflow:
+  #       condition: service_healthy
+  #   volumes:
+  #     - omniroute-data:/data
+
+volumes:
+  freeflow-data:
+  # omniroute-data:
