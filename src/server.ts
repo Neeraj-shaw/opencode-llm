@@ -1,21 +1,14 @@
 /**
  * freeflow-omniroute — Standalone OpenAI-compatible API Server
  *
- * Exposes pi-freeflow's 33 free models (OpenCode Zen, KiloCode Gateway,
- * OVHcloud AI Endpoints) as a standard OpenAI-compatible API that OmniRoute
- * can consume as a self-hosted provider on EC2.
+ * Exposes pi-freeflow's 35 free models (OpenCode Zen, KiloCode Gateway,
+ * OVHcloud AI Endpoints, Cline) as a standard OpenAI-compatible API that
+ * OmniRoute can consume as a self-hosted provider on EC2.
  *
- * Run:   node --experimental-strip-types src/server.ts
- * Test:  curl http://localhost:28280/v1/models
- *
- * OmniRoute integration:
- *   OMNIROUTE_SELF_HOSTED_PROVIDERS='
- *     providers:
- *       - id: freeflow
- *         kind: openai
- *         baseUrl: http://localhost:28280/v1
- *         model: deepseek-v4.1-flash-free
- *   '
+ * Includes:
+ * - Multi-proxy relay management (GET/POST/DELETE /v1/relays)
+ * - Cline account rotation & WorkOS device login (POST /v1/auth/cline/*)
+ * - KiloCode keyless gateway & custom API key support
  */
 
 import * as http from "node:http";
@@ -30,12 +23,18 @@ import {
 } from "./config.ts";
 import { ALL_MODELS, getModelDef, resolveCanonicalModelId } from "./models.ts";
 import { routeRequest } from "./upstream.ts";
+import { getRelays, addRelay, removeRelay } from "./relay.ts";
+import {
+  getClineAccounts,
+  addClineToken,
+  removeClineAccount,
+  startClineDeviceAuth,
+  pollClineDeviceToken,
+  registerClineToken,
+} from "./cline.ts";
 import { log, logInfo, logWarn, logError } from "./logger.ts";
 
-// ── Ensure data directory exists ────────────────────────────────
 ensureDataDir();
-
-// ── Auth check ──────────────────────────────────────────────────
 
 function isAuthorized(req: http.IncomingMessage): boolean {
   if (!REQUIRE_AUTH) return true;
@@ -44,8 +43,6 @@ function isAuthorized(req: http.IncomingMessage): boolean {
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
   return token === API_TOKEN;
 }
-
-// ── Body parser ─────────────────────────────────────────────────
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -65,15 +62,12 @@ function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-// ── /v1/models endpoint ─────────────────────────────────────────
-
 function handleModels(res: http.ServerResponse): void {
   const models = ALL_MODELS.map((m) => ({
     id: m.id,
     object: "model" as const,
     created: Math.floor(Date.now() / 1000),
-    owned_by: m.source === "kilo" ? "kilocode" : m.source === "ovh" ? "ovhcloud" : "opencode",
-    // Extra metadata for OmniRoute's model catalog
+    owned_by: m.source === "kilo" ? "kilocode" : m.source === "ovh" ? "ovhcloud" : m.source === "cline" ? "cline" : "opencode",
     permission: [{
       id: `modelperm-${m.id}`,
       object: "model_permission",
@@ -88,7 +82,6 @@ function handleModels(res: http.ServerResponse): void {
       group: null,
       is_blocking: false,
     }],
-    // Extended info useful for OmniRoute's UI/catalog
     ...(m.contextWindow ? { context_window: m.contextWindow } : {}),
     ...(m.maxTokens ? { max_tokens: m.maxTokens } : {}),
   }));
@@ -97,33 +90,37 @@ function handleModels(res: http.ServerResponse): void {
   res.end(JSON.stringify({ object: "list", data: models }));
 }
 
-// ── /health endpoint ────────────────────────────────────────────
-
 function handleHealth(res: http.ServerResponse): void {
+  const relays = getRelays();
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({
     status: "ok",
-    version: "1.0.0",
+    version: "1.1.0",
     models: ALL_MODELS.length,
     upstreams: {
       opencode: ALL_MODELS.filter(m => m.source === "opencode").length,
       kilo: ALL_MODELS.filter(m => m.source === "kilo").length,
       ovh: ALL_MODELS.filter(m => m.source === "ovh").length,
+      cline: ALL_MODELS.filter(m => m.source === "cline").length,
+    },
+    relays: {
+      total: relays.length,
+      healthy: relays.filter(r => Date.now() >= r.coolingUntil).length,
+      list: relays.map(r => ({ label: r.label, url: r.url, healthy: Date.now() >= r.coolingUntil })),
+    },
+    cline: {
+      accountsCount: getClineAccounts().length,
     },
     timestamp: new Date().toISOString(),
   }));
 }
 
-// ── CORS headers ────────────────────────────────────────────────
-
 function setCorsHeaders(res: http.ServerResponse): void {
   res.setHeader("access-control-allow-origin", "*");
-  res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
-  res.setHeader("access-control-allow-headers", "Content-Type, Authorization");
+  res.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("access-control-allow-headers", "Content-Type, Authorization, X-Kilo-Key");
   res.setHeader("access-control-max-age", "86400");
 }
-
-// ── Main request handler ────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
   const reqId = randomUUID().slice(0, 8);
@@ -131,7 +128,6 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname;
   const method = req.method?.toUpperCase() || "GET";
 
-  // CORS preflight
   setCorsHeaders(res);
   if (method === "OPTIONS") {
     res.writeHead(204);
@@ -139,7 +135,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Health check (no auth required)
+  // Health check
   if (pathname === "/health" || pathname === "/") {
     handleHealth(res);
     return;
@@ -158,13 +154,115 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /v1/models
+  // ── Relay Pool Management ─────────────────────────────────────
+  if (pathname === "/v1/relays") {
+    if (method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ object: "list", data: getRelays() }));
+      return;
+    }
+    if (method === "POST") {
+      const body = await readBody(req);
+      const parsed = JSON.parse(body.toString("utf8") || "{}");
+      if (!parsed.url) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'url' field" }));
+        return;
+      }
+      const created = addRelay(parsed.url, parsed.label, parsed.auth);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(created));
+      return;
+    }
+    if (method === "DELETE") {
+      const body = await readBody(req);
+      const parsed = JSON.parse(body.toString("utf8") || "{}");
+      const target = parsed.url || parsed.label || url.searchParams.get("url") || url.searchParams.get("label");
+      if (!target) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'url' or 'label' parameter" }));
+        return;
+      }
+      const removed = removeRelay(target);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ success: removed }));
+      return;
+    }
+  }
+
+  // ── Cline Account Management ──────────────────────────────────
+  if (pathname === "/v1/auth/cline/accounts" && method === "GET") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ accounts: getClineAccounts() }));
+    return;
+  }
+
+  if (pathname === "/v1/auth/cline/device" && method === "POST") {
+    try {
+      const authData = await startClineDeviceAuth();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(authData));
+    } catch (err) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+    return;
+  }
+
+  if (pathname === "/v1/auth/cline/poll" && method === "POST") {
+    try {
+      const body = await readBody(req);
+      const { device_code, slot } = JSON.parse(body.toString("utf8") || "{}");
+      if (!device_code) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'device_code'" }));
+        return;
+      }
+      const tokens = await pollClineDeviceToken(device_code);
+      const reg = await registerClineToken(tokens.access_token, tokens.refresh_token);
+      const acc = addClineToken(reg.token, reg.email, slot);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ success: true, slot: acc.slot, email: acc.email }));
+    } catch (err) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+    return;
+  }
+
+  if (pathname === "/v1/auth/cline/token" && method === "POST") {
+    try {
+      const body = await readBody(req);
+      const { token, email, slot } = JSON.parse(body.toString("utf8") || "{}");
+      if (!token) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'token'" }));
+        return;
+      }
+      const acc = addClineToken(token, email, slot);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ success: true, slot: acc.slot }));
+    } catch (err) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+    return;
+  }
+
+  if (pathname.startsWith("/v1/auth/cline/") && method === "DELETE") {
+    const slot = decodeURIComponent(pathname.slice("/v1/auth/cline/".length));
+    const removed = removeClineAccount(slot);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ success: removed }));
+    return;
+  }
+
+  // ── Standard Model Endpoints ──────────────────────────────────
   if (pathname === "/v1/models" && method === "GET") {
     handleModels(res);
     return;
   }
 
-  // GET /v1/models/:id
   if (pathname.startsWith("/v1/models/") && method === "GET") {
     const modelId = decodeURIComponent(pathname.slice("/v1/models/".length));
     const model = getModelDef(modelId);
@@ -178,7 +276,7 @@ const server = http.createServer(async (req, res) => {
       id: model.id,
       object: "model",
       created: Math.floor(Date.now() / 1000),
-      owned_by: model.source === "kilo" ? "kilocode" : model.source === "ovh" ? "ovhcloud" : "opencode",
+      owned_by: model.source === "kilo" ? "kilocode" : model.source === "ovh" ? "ovhcloud" : model.source === "cline" ? "cline" : "opencode",
       context_window: model.contextWindow,
       max_tokens: model.maxTokens,
     }));
@@ -190,7 +288,7 @@ const server = http.createServer(async (req, res) => {
     let body: Buffer;
     try {
       body = await readBody(req);
-    } catch (err) {
+    } catch {
       res.writeHead(413, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "Request body too large", type: "invalid_request_error" } }));
       return;
@@ -216,7 +314,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // POST /v1/responses (OpenAI Responses API)
+  // POST /v1/responses
   if (pathname === "/v1/responses" && method === "POST") {
     let body: Buffer;
     try {
@@ -247,41 +345,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 404 fallback
   res.writeHead(404, { "content-type": "application/json" });
   res.end(JSON.stringify({
     error: {
-      message: `Not found: ${method} ${pathname}. Supported: GET /v1/models, POST /v1/chat/completions, POST /v1/responses`,
+      message: `Not found: ${method} ${pathname}.`,
       type: "invalid_request_error",
     },
   }));
 });
 
-// ── Start server ────────────────────────────────────────────────
-
 server.listen(SERVER_PORT, SERVER_HOST, () => {
   const authMode = REQUIRE_AUTH ? "token-gated" : "open (no auth)";
   logInfo("═══════════════════════════════════════════════════════════");
-  logInfo("  freeflow-omniroute server started");
+  logInfo("  opencode-llm (freeflow-omniroute) started");
   logInfo(`  Listening on http://${SERVER_HOST}:${SERVER_PORT}`);
-  logInfo(`  Models: ${ALL_MODELS.length} free models`);
+  logInfo(`  Models: ${ALL_MODELS.length} free models (OpenCode Zen, KiloCode, OVH, Cline)`);
+  logInfo(`  Relays: ${getRelays().length} active egress relays`);
   logInfo(`  Auth: ${authMode}`);
-  logInfo("");
-  logInfo("  Endpoints:");
-  logInfo(`    GET  /health              — Health check`);
-  logInfo(`    GET  /v1/models           — List all models`);
-  logInfo(`    POST /v1/chat/completions — Chat completions`);
-  logInfo(`    POST /v1/responses        — Responses API`);
-  logInfo("");
-  logInfo("  OmniRoute integration:");
-  logInfo("    Add to .env:");
-  logInfo(`    OMNIROUTE_SELF_HOSTED_PROVIDERS='`);
-  logInfo(`      providers:`);
-  logInfo(`        - id: freeflow`);
-  logInfo(`          kind: openai`);
-  logInfo(`          baseUrl: http://<EC2_IP>:${SERVER_PORT}/v1`);
-  logInfo(`          model: deepseek-v4.1-flash-free`);
-  logInfo(`    '`);
   logInfo("═══════════════════════════════════════════════════════════");
 });
 
@@ -290,13 +370,10 @@ server.on("error", (err) => {
   process.exit(1);
 });
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
-  logInfo("SIGTERM received, shutting down...");
   server.close(() => process.exit(0));
 });
 
 process.on("SIGINT", () => {
-  logInfo("SIGINT received, shutting down...");
   server.close(() => process.exit(0));
 });

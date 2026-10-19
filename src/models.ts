@@ -5,7 +5,7 @@
  * Each model is exposed with OpenAI-compatible metadata for OmniRoute.
  */
 
-export type Upstream = "opencode" | "kilo" | "ovh";
+export type Upstream = "opencode" | "kilo" | "ovh" | "cline";
 
 export interface ModelDef {
   id: string;
@@ -130,11 +130,34 @@ export const OVH_MODELS: ModelDef[] = [
   { id: "ovh-free/Meta-Llama-3_3-70B-Instruct", name: "Meta Llama 3.3 70B Instruct [OVH]", reasoning: false, source: "ovh", contextWindow: 131_072, maxTokens: 16_384, input: ["text"] },
 ];
 
+// ── Cline Free Models (2 models) ────────────────────────────────
+
+export const CLINE_MODELS: ModelDef[] = [
+  {
+    id: "cline-free/muse-spark-1.3-contributor",
+    name: "Muse Spark 1.3 [Cline]",
+    reasoning: true,
+    source: "cline",
+    contextWindow: 1_048_576,
+    maxTokens: 131_072,
+    input: ["text", "image", "video"],
+    thinkingLevelMap: { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: null },
+  },
+  {
+    id: "z-ai/glm-5.3-flash",
+    name: "GLM 5.3 Flash [Cline]",
+    reasoning: true,
+    source: "cline",
+    contextWindow: 1_048_576,
+    maxTokens: 131_072,
+    input: ["text", "image", "video"],
+    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+  },
+];
+
 // ── Combined catalog ────────────────────────────────────────────
 
-export const ALL_MODELS: ModelDef[] = [...OPENCODE_MODELS, ...KILO_MODELS, ...OVH_MODELS];
-// Note: Cline models are omitted — they require per-user browser login
-// and are not suitable for a headless server deployment on EC2.
+export const ALL_MODELS: ModelDef[] = [...OPENCODE_MODELS, ...KILO_MODELS, ...OVH_MODELS, ...CLINE_MODELS];
 
 export const MODEL_MAP = new Map<string, ModelDef>(
   ALL_MODELS.map((m): [string, ModelDef] => [m.id, m]),
@@ -192,6 +215,11 @@ export function isKiloModel(id: string): boolean {
 export function isOvhModel(id: string): boolean {
   const m = getModelDef(id);
   return m?.source === "ovh";
+}
+
+export function isClineModel(id: string): boolean {
+  const m = getModelDef(id);
+  return m?.source === "cline";
 }
 
 export function ovhUpstreamModelId(id: string): string {

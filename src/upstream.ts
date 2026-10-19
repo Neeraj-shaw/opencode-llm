@@ -2,9 +2,10 @@
  * freeflow-omniroute — Upstream Proxy
  *
  * Routes requests to the appropriate upstream:
- * - OpenCode Zen (opencode.ai) with client fingerprinting + tool injection + SSE conversion
- * - KiloCode Gateway (api.kilo.ai) keyless
+ * - OpenCode Zen (opencode.ai) with client fingerprinting + tool injection + SSE conversion + relay pool
+ * - KiloCode Gateway (api.kilo.ai) keyless or with custom Kilo API token
  * - OVHcloud AI Endpoints (kepler.ai.cloud.ovh.net) keyless
+ * - Cline (api.cline.bot) with multi-login rotation
  */
 
 import { Readable } from "node:stream";
@@ -22,9 +23,12 @@ import {
   getModelDef,
   isKiloModel,
   isOvhModel,
+  isClineModel,
   ovhUpstreamModelId,
   resolveCanonicalModelId,
 } from "./models.ts";
+import { relayFetch } from "./relay.ts";
+import { rollClineChat } from "./cline.ts";
 import { log, isDebugEnabled } from "./logger.ts";
 
 function upstreamTimeoutError(): DOMException {
@@ -44,12 +48,6 @@ const COMPAT_FINGERPRINT_SCHEMAS: Record<string, Record<string, unknown>> = {
 
 const FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read", "edit", "write"] as const;
 
-/**
- * Enforce OpenCode Zen client fingerprint:
- * 1. Declares the placeholder sextet {bash, glob, grep, read, edit, write}
- * 2. stream: true is required upstream
- * 3. Removes unsupported tool_choice values (Zen only accepts "auto" or undefined)
- */
 function prepareOpenCodeBody(body: Record<string, unknown>): {
   addedPlaceholders: string[];
   callerHadTools: boolean;
@@ -82,12 +80,10 @@ function prepareOpenCodeBody(body: Record<string, unknown>): {
 
   body.tools = tools;
 
-  // Zen only accepts "auto" or undefined for tool_choice
   if (body.tool_choice && typeof body.tool_choice === "string" && body.tool_choice.toLowerCase() !== "auto") {
     delete body.tool_choice;
   }
 
-  // Zen free-tier mandates stream: true upstream
   body.stream = true;
 
   return { addedPlaceholders, callerHadTools };
@@ -122,10 +118,6 @@ function parseSseEvents(text: string): SseEvent[] {
   return result;
 }
 
-/**
- * Converts OpenCode Zen's SSE stream to a single standard OpenAI Chat Completion JSON response.
- * Filters out injected compat tool calls and strips tool_calls if caller had none.
- */
 function sseToChatCompletion(
   sseText: string,
   modelName: string,
@@ -195,7 +187,6 @@ function sseToChatCompletion(
     }
   }
 
-  // Filter out any injected placeholders
   const rawToolCalls = Array.from(toolCallsMap.values());
   const keptToolCalls = rawToolCalls.filter((tc) => {
     const name = tc.function.name.toLowerCase();
@@ -268,7 +259,7 @@ function pipeStream(
   });
 }
 
-// ── OpenCode Zen Handler ────────────────────────────────────────
+// ── OpenCode Zen Handler (Relay-backed) ──────────────────────────
 
 async function handleOpenCodeRequest(
   body: Record<string, unknown>,
@@ -300,15 +291,24 @@ async function handleOpenCodeRequest(
       log("debug", `OpenCode upstream → ${upstreamUrl}`, { model: modelName, clientRequestedStream }, reqId);
     }
 
-    const upstreamRes = await fetch(upstreamUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    // Dispatches through the multi-relay pool with automatic rotation on 429
+    const { response: upstreamRes, relayUsed } = await relayFetch(
+      upstreamUrl,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+      reqId,
+    );
 
     clearTimeout(timeoutId);
     res.off("close", onClientGone);
+
+    if (relayUsed) {
+      log("info", `OpenCode request served via relay: ${relayUsed}`, { model: modelName }, reqId);
+    }
 
     if (!upstreamRes.ok) {
       const errorText = await upstreamRes.text().catch(() => "");
@@ -323,7 +323,6 @@ async function handleOpenCodeRequest(
     }
 
     if (clientRequestedStream && upstreamRes.body) {
-      // Client wants SSE stream: pipe through directly
       const ct = upstreamRes.headers.get("content-type") || "text/event-stream";
       if (!res.headersSent) {
         res.writeHead(200, {
@@ -335,7 +334,6 @@ async function handleOpenCodeRequest(
       }
       pipeStream(upstreamRes.body, res, req, reqId);
     } else {
-      // Client wants a single non-streaming JSON response: aggregate SSE into JSON
       const sseText = await upstreamRes.text();
       const completionJson = sseToChatCompletion(sseText, modelName, addedPlaceholders, callerHadTools);
       if (!res.headersSent) {
@@ -380,9 +378,16 @@ async function handleKiloRequest(
       log("debug", `Kilo upstream → ${kiloUrl}`, { model: modelName }, reqId);
     }
 
+    // Support optional Kilo API key via env or header
+    const kiloHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    const customKey = process.env.KILO_API_KEY || (req.headers["x-kilo-key"] as string);
+    if (customKey) {
+      kiloHeaders["Authorization"] = `Bearer ${customKey}`;
+    }
+
     const upstreamRes = await fetch(kiloUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: kiloHeaders,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -444,7 +449,6 @@ async function handleOvhRequest(
   clientRequestedStream: boolean,
 ): Promise<void> {
   const modelName = String(body.model || "");
-  // OVH requires the bare model ID without the 'ovh-free/' prefix
   const ovhBody = { ...body, model: ovhUpstreamModelId(modelName) };
 
   const controller = new AbortController();
@@ -460,7 +464,6 @@ async function handleOvhRequest(
       log("debug", `OVH upstream → ${OVH_CHAT_URL}`, { model: ovhBody.model }, reqId);
     }
 
-    // Keyless: no Authorization header needed for OVH anonymous endpoints
     const upstreamRes = await fetch(OVH_CHAT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -514,6 +517,70 @@ async function handleOvhRequest(
   }
 }
 
+// ── Cline Handler (Multi-account pool) ───────────────────────────
+
+async function handleClineRequest(
+  body: Record<string, unknown>,
+  pathname: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  reqId: string,
+  clientRequestedStream: boolean,
+): Promise<void> {
+  const modelName = String(body.model || "");
+
+  try {
+    if (isDebugEnabled()) {
+      log("debug", `Cline roll → ${modelName}`, undefined, reqId);
+    }
+
+    const { response: upstreamRes, slotUsed } = await rollClineChat(body, clientRequestedStream, reqId);
+
+    if (slotUsed) {
+      log("info", `Cline served by slot [${slotUsed}]`, { model: modelName }, reqId);
+    }
+
+    if (!upstreamRes.ok) {
+      const errorText = await upstreamRes.text().catch(() => "");
+      log("warn", `Cline upstream ${upstreamRes.status}`, { status: upstreamRes.status, model: modelName }, reqId);
+      if (!res.headersSent) {
+        res.writeHead(upstreamRes.status, {
+          "content-type": upstreamRes.headers.get("content-type") || "application/json",
+        });
+        res.end(errorText);
+      }
+      return;
+    }
+
+    if (clientRequestedStream && upstreamRes.body) {
+      const ct = upstreamRes.headers.get("content-type") || "text/event-stream";
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          "content-type": ct,
+          "cache-control": "no-cache, no-transform",
+          "connection": "keep-alive",
+          "x-accel-buffering": "no",
+        });
+      }
+      pipeStream(upstreamRes.body, res, req, reqId);
+    } else {
+      const text = await upstreamRes.text();
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          "content-type": upstreamRes.headers.get("content-type") || "application/json",
+        });
+        res.end(text);
+      }
+    }
+  } catch (err) {
+    log("error", "Cline proxy error", { error: String(err) }, reqId);
+    if (!res.headersSent) {
+      res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "upstream error", type: "proxy_error" } }));
+    }
+  }
+}
+
 // ── Main Routing Entry Point ────────────────────────────────────
 
 export async function routeRequest(
@@ -549,7 +616,9 @@ export async function routeRequest(
 
   const clientRequestedStream = body.stream === true;
 
-  if (isOvhModel(modelId)) {
+  if (isClineModel(modelId)) {
+    await handleClineRequest(body, pathname, req, res, reqId, clientRequestedStream);
+  } else if (isOvhModel(modelId)) {
     await handleOvhRequest(body, pathname, req, res, reqId, clientRequestedStream);
   } else if (isKiloModel(modelId)) {
     await handleKiloRequest(body, pathname, req, res, reqId, clientRequestedStream);

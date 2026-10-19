@@ -1,8 +1,8 @@
 # opencode-llm
 
-> 33 free AI models on your EC2 instance, ready for OmniRoute. Zero API keys, zero cost.
+> 35 free AI models on your EC2 instance, ready for OmniRoute. Zero API keys, multi-proxy relay pool, and Cline/Kilo account support.
 
-Standalone OpenAI-compatible API server adapting [pi-freeflow](https://github.com/trefeon/pi-freeflow)'s free model catalog (OpenCode Zen, KiloCode, OVHcloud) for use with [OmniRoute](https://github.com/diegosouzapw/OmniRoute) on EC2.
+Standalone OpenAI-compatible API server adapting [pi-freeflow](https://github.com/trefeon/pi-freeflow)'s free model catalog (OpenCode Zen, KiloCode, OVHcloud, Cline) for use with [OmniRoute](https://github.com/diegosouzapw/OmniRoute) on EC2.
 
 ---
 
@@ -10,24 +10,125 @@ Standalone OpenAI-compatible API server adapting [pi-freeflow](https://github.co
 
 | Feature | Details |
 | :--- | :--- |
-| **33 free models** | 12 OpenCode Zen + 13 KiloCode Gateway + 8 OVHcloud AI Endpoints |
+| **35 free models** | 12 OpenCode Zen + 13 KiloCode Gateway + 8 OVHcloud + 2 Cline models |
 | **OpenAI-compatible API** | Standard `/v1/chat/completions`, `/v1/models`, `/v1/responses` |
+| **Multiple Proxy Relay Pool** | Spread egress across multiple Cloudflare/Deno/Vercel/WARP relays with auto-rotation on 429 |
+| **Cline Login & Pool** | WorkOS device code login + account rotation across multiple Cline logins |
+| **KiloCode Auth** | Keyless free gateway out-of-the-box, with optional custom `KILO_API_KEY` support |
 | **OmniRoute integration** | Drop-in self-hosted provider via `OMNIROUTE_SELF_HOSTED_PROVIDERS` or Dashboard |
-| **Zero API keys** | All upstreams are keyless free tiers |
+| **Zero API keys required** | All upstreams have keyless free tiers |
 | **EC2-ready** | systemd service, Docker, docker-compose — pick your deployment |
-| **Token-gated** | Optional `FREEFLOW_API_TOKEN` for production use |
 | **Context up to 1M** | Multiple models support 1M+ token context windows |
 | **SSE streaming** | Full streaming support for all models |
 
-### Models available
+### Models available (35 total)
 
-**OpenCode Zen (12):** cat-jam-free, mimo-v2.6-flash-free, nemotron-3-ultra-free, nemotron-3.5-lightning-free, nemotron-3.5-super-vl-free, big-pickle, space-bunny-free, longcat-2.5-preview-free, glm-5.3-flash-free, beam-free, exo-free, deepseek-v4.1-flash-free
+**OpenCode Zen (12):** `cat-jam-free`, `mimo-v2.6-flash-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `nemotron-3.5-super-vl-free`, `big-pickle`, `space-bunny-free`, `longcat-2.5-preview-free`, `glm-5.3-flash-free`, `beam-free`, `exo-free`, `deepseek-v4.1-flash-free`
 
-**KiloCode Gateway (13):** dots-3-note-preview, nemotron-3-nano-omni, nemotron-3-ultra-550b, nemotron-3.5-lightning, nemotron-3-super, north-mini-code, laguna-s-2.1, laguna-xs-2.1, lfm-2.5, kilo-auto, openrouter, glyph-cluster, inkling-small
+**KiloCode Gateway (13):** `dots-3-note-preview`, `nemotron-3-nano-omni`, `nemotron-3-ultra-550b`, `nemotron-3.5-lightning`, `nemotron-3-super`, `north-mini-code`, `laguna-s-2.1`, `laguna-xs-2.1`, `lfm-2.5`, `kilo-auto`, `openrouter`, `glyph-cluster`, `inkling-small`
 
-**OVHcloud AI Endpoints (8):** gpt-oss-120b, gpt-oss-20b, qwen3.5-397b, qwen3.5-9b, qwen3.6-27b, qwen3.8-27b, mistral-small-3.2, llama-3.3-70b
+**OVHcloud AI Endpoints (8):** `gpt-oss-120b`, `gpt-oss-20b`, `qwen3.5-397b`, `qwen3.5-9b`, `qwen3.6-27b`, `qwen3.8-27b`, `mistral-small-3.2`, `llama-3.3-70b`
 
-> **Note:** Cline models are excluded — they require per-user browser login and are not suitable for headless server deployment.
+**Cline (2):** `cline-free/muse-spark-1.3-contributor`, `z-ai/glm-5.3-flash` (login via `/v1/auth/cline/device` or `/v1/auth/cline/token`)
+
+---
+
+## Multiple Proxy (Relay Pool) Setup
+
+OpenCode Zen enforces rate-limits per egress IP. To avoid hitting 429 limits, you can route requests through a pool of edge relays (Cloudflare Workers, Deno Deploy, Vercel, or self-hosted WARP relay nodes).
+
+### 1. Via Environment Variable
+```env
+FREEFLOW_RELAYS=https://worker1.yourname.workers.dev,https://worker2.yourname.workers.dev
+FREEFLOW_RELAY_MODE=auto # auto (sticky primary) or spread (round-robin)
+```
+
+### 2. Via REST API (Runtime Management)
+```bash
+# List all active relays and their health
+curl http://localhost:28280/v1/relays
+
+# Add a new relay to the pool
+curl -X POST http://localhost:28280/v1/relays \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://my-relay.workers.dev", "label": "cf-relay-1"}'
+
+# Remove a relay
+curl -X DELETE http://localhost:28280/v1/relays \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://my-relay.workers.dev"}'
+```
+
+When a relay returns HTTP 429, 502, 503, or 504, the server automatically cools it down and rolls to the next healthy relay in the pool. When all relays are cooling, it falls back to direct upstream.
+
+---
+
+## Cline Login & Multi-Account Pool
+
+Cline provides free daily promo models (`muse-spark-1.3-contributor`, `glm-5.3-flash`). You can add one or more Cline accounts to rotate across when one hits its daily limit.
+
+### Option A: WorkOS Device Flow Login (No manual token copy)
+1. Request a login code:
+```bash
+curl -X POST http://localhost:28280/v1/auth/cline/device
+```
+Response:
+```json
+{
+  "user_code": "WDJB-MJHT",
+  "verification_uri": "https://workos.com/device",
+  "verification_uri_complete": "https://workos.com/device?user_code=WDJB-MJHT",
+  "device_code": "..."
+}
+```
+2. Open the URL in your browser and confirm login.
+3. Poll to finish and register:
+```bash
+curl -X POST http://localhost:28280/v1/auth/cline/poll \
+  -H "Content-Type: application/json" \
+  -d '{"device_code": "<device_code>", "slot": "personal"}'
+```
+
+### Option B: Add Token Directly
+```bash
+curl -X POST http://localhost:28280/v1/auth/cline/token \
+  -H "Content-Type: application/json" \
+  -d '{"token": "workos:...", "email": "you@example.com", "slot": "slot-1"}'
+```
+
+### Manage Saved Accounts
+```bash
+# List saved logins
+curl http://localhost:28280/v1/auth/cline/accounts
+
+# Delete a login slot
+curl -X DELETE http://localhost:28280/v1/auth/cline/slot-1
+```
+
+---
+
+## KiloCode Login & API Key Support
+
+- **Default (Keyless)**: All 13 KiloCode Gateway models work without any key out-of-the-box.
+- **Custom Token**: If you have a paid or personalized KiloCode Gateway key, set `KILO_API_KEY=your_key` in `.env` or send `X-Kilo-Key: your_key` in the request header.
+
+---
+
+## How OmniRoute Itself Handles Proxies & Logins
+
+OmniRoute (hosted on your EC2) also has its own built-in features:
+1. **OmniRoute Proxies**: Go to OmniRoute Dashboard (`http://<EC2-IP>:20128`) → **Settings** → **Proxies** to configure forward HTTP/HTTPS/SOCKS5 proxies and assign them to specific providers.
+2. **OmniRoute Built-in OAuth**: Go to Dashboard → **Providers** → **Add Connection** to authenticate directly with Cline, KiloCode, or GitHub Copilot via OAuth.
+3. **OmniRoute Self-Hosted Provider**: Use `opencode-llm` as the unified endpoint for all 35 free models by adding it to OmniRoute's `.env`:
+   ```env
+   OMNIROUTE_SELF_HOSTED_PROVIDERS='
+     providers:
+       - id: freeflow
+         kind: openai
+         baseUrl: http://127.0.0.1:28280/v1
+         model: deepseek-v4.1-flash-free
+   '
+   ```
 
 ---
 
