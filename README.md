@@ -196,6 +196,44 @@ curl http://localhost:28280/v1/chat/completions \
   }'
 ```
 
+## Dedicated Settings Panel
+
+You have two ways to access the visual management panel:
+
+### 1. Embedded Web Control Panel (No setup needed)
+Access the built-in control panel directly at:
+```
+http://<YOUR_EC2_IP>:28280/dashboard
+```
+Features:
+- Live relay pool status, health, and latency
+- Add/remove Cloudflare/Deno/Vercel/WARP relays
+- One-click WorkOS device code login for Cline
+- Interactive prompt tester for all 35 models
+
+---
+
+### 2. Native OmniRoute Dashboard Panel (`/dashboard/freeflow`)
+You can mount a native tab directly inside OmniRoute's own Next.js sidebar/dashboard on EC2 using the included installer:
+
+```bash
+# Run the automated panel installer inside your cloned opencode-llm repository:
+cd /opt/opencode-llm/omniroute-panel
+sudo chmod +x install.sh
+sudo ./install.sh /path/to/omniroute
+```
+
+This automatically:
+1. Installs the route to `src/app/(dashboard)/dashboard/freeflow/` in OmniRoute
+2. Adds **"FreeFlow Models & Proxies"** to OmniRoute's sidebar navigation under the proxy group
+3. Pre-configures OmniRoute's `.env` to connect to `http://127.0.0.1:28280/v1`
+4. Rebuild or restart OmniRoute:
+   ```bash
+   cd /path/to/omniroute
+   pnpm build   # or pm2 restart omniroute / docker restart omniroute
+   ```
+Now visit `http://<YOUR_EC2_IP>:20128/dashboard/freeflow` to manage everything directly within OmniRoute!
+
 ---
 
 ## OmniRoute Integration

@@ -32,6 +32,7 @@ import {
   pollClineDeviceToken,
   registerClineToken,
 } from "./cline.ts";
+import { renderDashboardHtml } from "./ui.ts";
 import { log, logInfo, logWarn, logError } from "./logger.ts";
 
 ensureDataDir();
@@ -132,6 +133,13 @@ const server = http.createServer(async (req, res) => {
   if (method === "OPTIONS") {
     res.writeHead(204);
     res.end();
+    return;
+  }
+
+  // Embedded Web Control Panel
+  if (pathname === "/dashboard" || (pathname === "/" && req.headers.accept?.includes("text/html"))) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(renderDashboardHtml());
     return;
   }
 
