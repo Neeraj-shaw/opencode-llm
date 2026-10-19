@@ -52,26 +52,27 @@ if [[ -f "${SECTIONS_FILE}" ]]; then
   else
     echo "  → Registering Freeflow in sidebar navigation..."
     # Inject into OMNI_PROXY_ITEMS right after providers
-    node -e "
-      const fs = require('fs');
-      let code = fs.readFileSync('${SECTIONS_FILE}', 'utf8');
-      const item = \`  {
-    id: \"freeflow\",
-    href: \"/dashboard/freeflow\",
-    i18nKey: \"freeflow\",
-    labelFallback: \"FreeFlow Models & Proxies\",
-    subtitleKey: \"freeflowSubtitle\",
-    subtitleFallback: \"35 free models, relay pool, Cline & Kilo\",
-    icon: \"stream\",
-  },\n\`;
-      if (code.includes('id: \"providers\",')) {
-        code = code.replace(/(id:\s*\"providers\",[\s\S]*?\},)/, '\$1\n' + item);
-        fs.writeFileSync('${SECTIONS_FILE}', code, 'utf8');
-        console.log('  ✓ Sidebar updated!');
+    node -e '
+      const fs = require("fs");
+      const file = process.argv[1];
+      let code = fs.readFileSync(file, "utf8");
+      const item = `  {
+    id: "freeflow",
+    href: "/dashboard/freeflow",
+    i18nKey: "freeflow",
+    labelFallback: "FreeFlow Models & Proxies",
+    subtitleKey: "freeflowSubtitle",
+    subtitleFallback: "35 free models, relay pool, Cline & Kilo",
+    icon: "stream",
+  },\n`;
+      if (code.includes("id: \"providers\",")) {
+        code = code.replace(/(id:\s*"providers",[\s\S]*?\},)/, "$1\n" + item);
+        fs.writeFileSync(file, code, "utf8");
+        console.log("  ✓ Sidebar navigation updated!");
       } else {
-        console.log('  Notice: Could not auto-patch sections.ts; route is accessible at /dashboard/freeflow');
+        console.log("  Notice: Route created at /dashboard/freeflow");
       }
-    "
+    ' "${SECTIONS_FILE}"
   fi
 fi
 

@@ -216,7 +216,7 @@ export default function FreeflowDashboardPage() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-bold tracking-tight">FreeFlow Models & Proxies</h1>
-            <Badge variant={healthData ? "success" : "danger"} size="sm">
+            <Badge variant={healthData ? "success" : "error"} size="sm">
               {healthData ? "Online (35 Models)" : "Service Offline"}
             </Badge>
           </div>
