@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node --experimental-strip-types src/server.ts",
     "dev": "node --experimental-strip-types --watch src/server.ts",
-    "health": "curl -s http://localhost:${FREEFLOW_PORT:-28280}/health | node -e \"process.stdin.resume();process.stdin.on('data',d=>{const j=JSON.parse(d);console.log(j.status==='ok'?'✓ healthy':'✗ degraded',JSON.stringify(j,null,2))})\""
+    "health": "curl -s http://localhost:${FREEFLOW_PORT:-28280}/health | node -e \"process.stdin.resume();process.stdin.on('data',d=>{const j=JSON.parse(d);console.log(j.status==='ok'?'✓ healthy':'✗ degraded',JSON.stringify(j,null,2))})\"",
+    "test": "node --experimental-strip-types --test test/*.test.mjs"
   },
   "dependencies": {
     "undici": "7.30.1"

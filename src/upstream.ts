@@ -529,6 +529,11 @@ async function handleClineRequest(
 ): Promise<void> {
   const modelName = String(body.model || "");
 
+  // FreeFlow exposes this local alias, while Cline's API catalog uses meta/.
+  if (modelName === "cline-free/muse-spark-1.3-contributor") {
+    body.model = "meta/muse-spark-1.3-contributor";
+  }
+
   try {
     if (isDebugEnabled()) {
       log("debug", `Cline roll → ${modelName}`, undefined, reqId);
@@ -544,10 +549,26 @@ async function handleClineRequest(
       const errorText = await upstreamRes.text().catch(() => "");
       log("warn", `Cline upstream ${upstreamRes.status}`, { status: upstreamRes.status, model: modelName }, reqId);
       if (!res.headersSent) {
-        res.writeHead(upstreamRes.status, {
-          "content-type": upstreamRes.headers.get("content-type") || "application/json",
-        });
-        res.end(errorText);
+        if (upstreamRes.status === 401 || upstreamRes.status === 403 || upstreamRes.status === 402) {
+          // Cline auth/credit is model-specific; do not expire the shared FreeFlow credential.
+          const creditsUnavailable = upstreamRes.status === 402;
+          res.writeHead(424, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            error: {
+              message: creditsUnavailable
+                ? "The connected Cline account cannot use this model because Cline reported a payment or credit issue. Check the Cline account in /dashboard/freeflow."
+                : "Connect a Cline account in /dashboard/freeflow before using this Cline model.",
+              type: "model_configuration_error",
+              code: creditsUnavailable ? "cline_credits_unavailable" : "cline_connection_required",
+              upstream_status: upstreamRes.status,
+            },
+          }));
+        } else {
+          res.writeHead(upstreamRes.status, {
+            "content-type": upstreamRes.headers.get("content-type") || "application/json",
+          });
+          res.end(errorText);
+        }
       }
       return;
     }
